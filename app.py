@@ -1,18 +1,23 @@
 # app.py
 # -*- coding: utf-8 -*-
-# Snap2Search — 이미지→텍스트(EasyOCR)→임베딩→코사인 검색 (세션보존 업로드)
+# Snap2Search — Google Vision OCR → CLOVA Embedding v2 → 코사인 검색 (경량)
 
 import os, json, uuid, tempfile, http.client
 import numpy as np
 import streamlit as st
 from PIL import Image
-import cv2
 
 # ===================== Secrets =====================
+# Secrets.toml 예시는 아래에 따로 첨부
 CLOVA_API_KEY = st.secrets.get("CLOVA_API_KEY", "")  # 예: "Bearer nv-********"
 CLOVA_HOST = st.secrets.get("CLOVA_HOST", "clovastudio.stream.ntruss.com")
+GCP_SA_INFO = st.secrets.get("gcp_service_account", None)
+
 if not CLOVA_API_KEY:
-    st.error("❌ CLOVA_API_KEY를 Secrets에 설정하세요. 예) 'Bearer nv-***'")
+    st.error("❌ Secrets에 CLOVA_API_KEY가 필요합니다. 예) 'Bearer nv-***'")
+    st.stop()
+if not GCP_SA_INFO:
+    st.error("❌ Secrets에 [gcp_service_account] 블록이 필요합니다.")
     st.stop()
 
 # ===================== 인덱스 경로 =================
@@ -33,6 +38,36 @@ def _store_upload():
             saved.append({"name": f.name, "type": f.type, "data": f.getvalue()})
     st.session_state["uploads"] = saved
 
+# ===================== Google Vision OCR =================
+@st.cache_resource
+def get_vision_client():
+    from google.cloud import vision
+    # st.secrets 의 dict를 그대로 사용
+    return vision.ImageAnnotatorClient.from_service_account_info(dict(GCP_SA_INFO))
+
+def vision_ocr_extract(tmp_path: str, use_document: bool = True) -> str:
+    """Google Vision OCR. 문서/영수증은 document_text_detection이 더 정확."""
+    from google.cloud import vision
+    client = get_vision_client()
+
+    with open(tmp_path, "rb") as f:
+        content = f.read()
+    image = vision.Image(content=content)
+
+    # 한국어/영어 힌트
+    img_ctx = vision.ImageContext(language_hints=["ko", "en"])
+
+    if use_document:
+        resp = client.document_text_detection(image=image, image_context=img_ctx)
+    else:
+        resp = client.text_detection(image=image, image_context=img_ctx)
+
+    if resp.error.message:
+        return f"(OCR 오류) {resp.error.message}"
+
+    ann = getattr(resp, "full_text_annotation", None)
+    return (ann.text if ann and ann.text else "").strip()
+
 # ===================== CLOVA v2 임베딩 ====================
 def clova_embed(text: str) -> np.ndarray:
     headers = {
@@ -50,36 +85,7 @@ def clova_embed(text: str) -> np.ndarray:
         raise RuntimeError(f"CLOVA embedding error: {data}")
     return np.asarray(data["result"]["embedding"], dtype=np.float32)
 
-# ===================== EasyOCR ===========================
-@st.cache_resource
-def load_reader():
-    import easyocr
-    # 한국어+영어 동시 인식, GPU 없이 CPU로
-    return easyocr.Reader(['ko', 'en'], gpu=False)
-
-def preprocess_for_ocr(img: Image.Image) -> np.ndarray:
-    """명암대비 강화 + 이진화(가벼운 전처리)"""
-    img = img.convert("RGB")
-    arr = np.array(img)
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-    # 약한 노이즈 제거 + OTSU
-    gray = cv2.medianBlur(gray, 3)
-    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return th  # cv2 이미지
-
-def easyocr_extract(tmp_path: str) -> str:
-    reader = load_reader()
-    pil = Image.open(tmp_path).convert("RGB")
-    pre = preprocess_for_ocr(pil)
-    # EasyOCR는 ndarray 입력을 지원
-    results = reader.readtext(pre, detail=1, paragraph=True)
-    lines = []
-    for _, txt, conf in results:
-        if txt and conf is not None and conf >= 0.2:  # 너무 낮은 신뢰도는 제거
-            lines.append(txt)
-    return "\n".join(lines).strip()
-
-# ===================== 인덱스 IO/검색 =====================
+# ===================== 인덱스 IO / 검색 ===================
 def load_index():
     if not (os.path.exists(VEC_PATH) and os.path.exists(META_PATH)):
         return None, []
@@ -116,8 +122,8 @@ def search(query: str, k: int = 5):
     return [(float(sims[i]), meta[i]) for i in idx]
 
 # ===================== UI ================================
-st.set_page_config(page_title="Snap2Search (EasyOCR)", page_icon="📷", layout="wide")
-st.title("📷 Snap2Search — 이미지→텍스트(EasyOCR)→임베딩→코사인 검색")
+st.set_page_config(page_title="Snap2Search (Vision + CLOVA)", page_icon="📷", layout="wide")
+st.title("📷 Snap2Search — Google Vision OCR → CLOVA 임베딩 → 코사인 검색")
 
 tab1, tab2 = st.tabs(["📥 인덱스 만들기", "🔍 검색하기"])
 
@@ -125,7 +131,7 @@ with tab1:
     st.subheader("이미지 업로드 & 인덱싱")
     files_widget = st.file_uploader(
         "이미지 업로드 (여러 장)",
-        type=["jpg","jpeg","png","webp"],
+        type=["jpg","jpeg","png","webp","heic","HEIC","pdf"],
         accept_multiple_files=True,
         key="uploader_main",
         on_change=_store_upload
@@ -139,16 +145,20 @@ with tab1:
             st.warning("먼저 이미지를 업로드하세요.")
         else:
             docs = []
-            with st.spinner("🔎 OCR 및 임베딩 중... (EasyOCR 초기 로딩 수 초)"):
+            with st.spinner("🔎 Vision OCR 및 임베딩 중..."):
                 for up in st.session_state["uploads"]:
+                    # 세션 바이트 → 임시 파일
                     suffix = os.path.splitext(up["name"])[1] or ".jpg"
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(up["data"])
                         tmp_path = tmp.name
-                    text = easyocr_extract(tmp_path)
+
+                    # 사진/라벨은 text_detection으로 바꾸고 싶으면 False로
+                    text = vision_ocr_extract(tmp_path, use_document=True)
                     if not text:
                         text = f"filename: {os.path.basename(tmp_path)}"
                     docs.append({"source": tmp_path, "text": text})
+
                 add_documents(docs)
 
             st.success(f"✅ {len(docs)}개 이미지 인덱싱 완료")
@@ -161,6 +171,7 @@ with tab2:
     st.subheader("자연어로 검색")
     q = st.text_input("예: '매일 두유 99.9', '설탕 무첨가 9.0g'")
     k = st.slider("결과 수 (k)", 1, 10, 5)
+
     cols = st.columns(2)
     with cols[0]:
         if st.button("인덱스 초기화", use_container_width=True):
