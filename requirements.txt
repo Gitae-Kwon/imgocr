@@ -1,11 +1,7 @@
 streamlit==1.38.0
-paddlepaddle==2.6.1
-paddleocr==2.7.0.10
-paddlex==2.7.1
-opencv-python-headless==4.10.0.84
-numpy==1.26.4
+requests==2.32.3
+Pillow==10.4.0
 langchain==0.2.12
 langchain-community==0.2.11
 faiss-cpu==1.8.0
 python-dotenv==1.0.1
-Pillow==10.4.0
