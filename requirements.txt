@@ -2,3 +2,6 @@ streamlit==1.38.0
 requests==2.32.3
 Pillow==10.4.0
 numpy==1.26.4
+opencv-python-headless==4.10.0.84
+paddlepaddle==2.6.1
+paddleocr==2.7.0.10
