@@ -6,4 +6,3 @@ langchain-community
 faiss-cpu
 python-dotenv
 Pillow
-requests
