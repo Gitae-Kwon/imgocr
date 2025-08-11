@@ -1,5 +1,13 @@
-# app.py
-# -*- coding: utf-8 -*-
+# 0) PaddleOCR 임포트 가드 (맨 위, 단독)
+try:
+    from paddleocr import PaddleOCR
+except Exception as e:
+    import streamlit as st
+    st.error("❌ PaddleOCR 로드 중 오류가 발생했습니다.\nrequirements.txt 버전과 Python 버전을 확인하세요.")
+    st.exception(e)
+    st.stop()
+
+# 1) 그 다음 나머지 임포트
 import os
 import json
 import uuid
@@ -9,8 +17,6 @@ import http.client
 import streamlit as st
 from PIL import Image
 from dotenv import load_dotenv
-
-from paddleocr import PaddleOCR
 from langchain.embeddings.base import Embeddings
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
