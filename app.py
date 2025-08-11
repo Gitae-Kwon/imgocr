@@ -1,17 +1,17 @@
 # app.py
 # -*- coding: utf-8 -*-
-# Snap2Search — 이미지→텍스트(OCR)→임베딩→코사인 검색 (초경량, 세션 보존 업로드)
+# Snap2Search — 이미지→텍스트(PaddleOCR)→임베딩→코사인 검색 (세션보존 업로드)
 
 import os, json, uuid, tempfile, http.client, requests
 import numpy as np
 import streamlit as st
+from io import BytesIO
 from PIL import Image
+import cv2
 
 # ===================== Secrets =====================
 CLOVA_API_KEY = st.secrets.get("CLOVA_API_KEY", "")  # 예: "Bearer nv-********"
 CLOVA_HOST = st.secrets.get("CLOVA_HOST", "clovastudio.stream.ntruss.com")
-OCR_SPACE_API_KEY = st.secrets.get("OCR_SPACE_API_KEY", "")  # 없으면 demo "helloworld"
-
 if not CLOVA_API_KEY:
     st.error("❌ CLOVA_API_KEY를 Secrets에 설정하세요. 예) 'Bearer nv-***'")
     st.stop()
@@ -24,11 +24,9 @@ os.makedirs(INDEX_DIR, exist_ok=True)
 
 # ===================== 세션 상태 ====================
 if "uploads" not in st.session_state:
-    # [{"name":..., "type":..., "data": b"..."}]
-    st.session_state["uploads"] = []
+    st.session_state["uploads"] = []  # [{"name":..., "type":..., "data": b"..."}]
 
 def _store_upload():
-    """file_uploader on_change 콜백: 업로드된 파일 바이트를 세션에 저장."""
     files = st.session_state.get("uploader_main")
     saved = []
     if files:
@@ -53,24 +51,41 @@ def clova_embed(text: str) -> np.ndarray:
         raise RuntimeError(f"CLOVA embedding error: {data}")
     return np.asarray(data["result"]["embedding"], dtype=np.float32)
 
-# ===================== OCR.space ==========================
-def ocr_space(path: str) -> str:
-    key = OCR_SPACE_API_KEY or "helloworld"
-    with open(path, "rb") as f:
-        r = requests.post(
-            "https://api.ocr.space/parse/image",
-            files={"filename": f},
-            data={"apikey": key, "language": "kor"},
-            timeout=90,
-        )
-    r.raise_for_status()
-    data = r.json()
-    if data.get("IsErroredOnProcessing"):
-        return f"(OCR 실패) {data.get('ErrorMessage') or data.get('ErrorDetails')}"
-    prs = data.get("ParsedResults") or []
-    return (prs[0].get("ParsedText") if prs else "") or ""
+# ===================== PaddleOCR (한글) ====================
+@st.cache_resource
+def load_ocr():
+    # 설치/로딩이 무거우므로 1회 캐시
+    from paddleocr import PaddleOCR
+    return PaddleOCR(use_angle_cls=True, lang="korean", use_gpu=False)
 
-# ===================== 인덱스 IO =========================
+def preprocess_for_ocr(img: Image.Image) -> np.ndarray:
+    """명암대비 강화 + 이진화 등 간단 전처리"""
+    img = img.convert("RGB")
+    arr = np.array(img)
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    # 노이즈 약간 제거 후 OTSU
+    gray = cv2.medianBlur(gray, 3)
+    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return th  # cv2 이미지
+
+def paddle_ocr_extract(tmp_path: str) -> str:
+    ocr = load_ocr()
+    # PIL로 열어 전처리 → 임시 png 저장 → OCR
+    pil = Image.open(tmp_path).convert("RGB")
+    pre = preprocess_for_ocr(pil)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t2:
+        cv2.imwrite(t2.name, pre)
+        in_path = t2.name
+    result = ocr.ocr(in_path, cls=True)
+    lines = []
+    for blk in (result or []):
+        for ln in (blk or []):
+            txt = ln[1][0]
+            if txt:
+                lines.append(txt)
+    return "\n".join(lines).strip()
+
+# ===================== 인덱스 IO/검색 =====================
 def load_index():
     if not (os.path.exists(VEC_PATH) and os.path.exists(META_PATH)):
         return None, []
@@ -86,7 +101,7 @@ def add_documents(docs: list):
     new_vecs = []
     for d in docs:
         v = clova_embed(d["text"])
-        v = v / (np.linalg.norm(v) + 1e-12)  # 코사인용 정규화
+        v = v / (np.linalg.norm(v) + 1e-12)
         new_vecs.append(v)
     new_vecs = np.stack(new_vecs, axis=0)
 
@@ -102,29 +117,28 @@ def search(query: str, k: int = 5):
         return []
     q = clova_embed(query)
     q = q / (np.linalg.norm(q) + 1e-12)
-    sims = vecs @ q  # 정규화했으니 내적=코사인
+    sims = vecs @ q
     idx = np.argsort(-sims)[:k]
     return [(float(sims[i]), meta[i]) for i in idx]
 
 # ===================== UI ================================
-st.set_page_config(page_title="Snap2Search (초경량)", page_icon="📷", layout="wide")
-st.title("📷 Snap2Search — 이미지→텍스트(OCR)→임베딩→코사인 검색 (초경량)")
+st.set_page_config(page_title="Snap2Search (PaddleOCR)", page_icon="📷", layout="wide")
+st.title("📷 Snap2Search — 이미지→텍스트(PaddleOCR)→임베딩→코사인 검색")
 
 tab1, tab2 = st.tabs(["📥 인덱스 만들기", "🔍 검색하기"])
 
 with tab1:
     st.subheader("이미지 업로드 & 인덱싱")
+    st.caption("JPG/PNG/WEBP 권장 (고해상도도 OK)")
 
-    # 업로드: 고유 key와 on_change 콜백으로 세션에 저장
     files_widget = st.file_uploader(
         "이미지 업로드 (여러 장)",
-        type=["jpg","jpeg","png","webp","heic","HEIC"],
+        type=["jpg","jpeg","png","webp"],
         accept_multiple_files=True,
         key="uploader_main",
         on_change=_store_upload
     )
 
-    # 업로드 상태 즉시 표시
     st.caption(f"업로드 된 파일 수: {len(st.session_state['uploads'])}")
     if st.session_state["uploads"]:
         st.info([x["name"] for x in st.session_state["uploads"]][:10])
@@ -134,18 +148,16 @@ with tab1:
             st.warning("먼저 이미지를 업로드하세요.")
         else:
             docs = []
-            with st.spinner("🔎 OCR 및 임베딩 중..."):
+            with st.spinner("🔎 OCR 및 임베딩 중... (첫 실행은 모델 로딩으로 수초 소요)"):
                 for up in st.session_state["uploads"]:
-                    # 세션 바이트 → 임시 파일
                     suffix = os.path.splitext(up["name"])[1] or ".jpg"
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(up["data"])
                         tmp_path = tmp.name
-                    text = ocr_space(tmp_path).strip()
+                    text = paddle_ocr_extract(tmp_path)
                     if not text:
                         text = f"filename: {os.path.basename(tmp_path)}"
                     docs.append({"source": tmp_path, "text": text})
-
                 add_documents(docs)
 
             st.success(f"✅ {len(docs)}개 이미지 인덱싱 완료")
@@ -156,10 +168,8 @@ with tab1:
 
 with tab2:
     st.subheader("자연어로 검색")
-    q = st.text_input("예: '영수증 총 결제 금액' / '빨간 나이키 신발'")
+    q = st.text_input("예: '매일 두유 99.9', '설탕 무첨가 9.0g'")
     k = st.slider("결과 수 (k)", 1, 10, 5)
-
-    # 인덱스 초기화 버튼(테스트용)
     cols = st.columns(2)
     with cols[0]:
         if st.button("인덱스 초기화", use_container_width=True):
