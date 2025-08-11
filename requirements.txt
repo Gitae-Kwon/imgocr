@@ -2,6 +2,4 @@ streamlit==1.38.0
 requests==2.32.3
 Pillow==10.4.0
 numpy==1.26.4
-easyocr==1.7.1
-opencv-python-headless==4.10.0.84
-torch==2.2.2
+google-cloud-vision==3.7.4
