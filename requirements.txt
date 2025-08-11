@@ -3,5 +3,6 @@ requests==2.32.3
 Pillow==10.4.0
 langchain==0.2.12
 langchain-community==0.2.11
-faiss-cpu==1.8.0
+faiss-cpu==1.7.4           # ⬅️ 1.8.0 대신 1.7.4
 python-dotenv==1.0.1
+numpy==1.26.4              # 안전핀
