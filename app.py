@@ -129,36 +129,47 @@ tab1, tab2 = st.tabs(["📥 인덱스 만들기", "🔍 검색하기"])
 
 with tab1:
     st.subheader("이미지 업로드 & 인덱싱")
-    files_widget = st.file_uploader(
-        "이미지 업로드 (여러 장)",
-        type=["jpg","jpeg","png","webp","heic","HEIC","pdf"],
-        accept_multiple_files=True,
-        key="uploader_main",
-        on_change=_store_upload
-    )
-    st.caption(f"업로드 된 파일 수: {len(st.session_state['uploads'])}")
-    if st.session_state["uploads"]:
+
+    # 폼으로 감싸서 리런에도 값 보존
+    with st.form("index_form", clear_on_submit=False):
+        files = st.file_uploader(
+            "이미지 업로드 (여러 장)",
+            type=["jpg","jpeg","png","webp","heic","HEIC","pdf"],
+            accept_multiple_files=True,
+            key="uploader_main_form",
+        )
+        submitted = st.form_submit_button("업로드 확정")
+
+    # 업로드 확정 시 세션에 저장 (리런돼도 유지)
+    if submitted:
+        st.session_state["uploads"] = []
+        if files:
+            for f in files:
+                st.session_state["uploads"].append(
+                    {"name": f.name, "type": f.type, "data": f.getvalue()}
+                )
+
+    st.caption(f"업로드 된 파일 수: {len(st.session_state.get('uploads', []))}")
+    if st.session_state.get("uploads"):
         st.info([x["name"] for x in st.session_state["uploads"]][:10])
 
-    if st.button("인덱싱 실행", use_container_width=True):
-        if not st.session_state["uploads"]:
-            st.warning("먼저 이미지를 업로드하세요.")
+    # 인덱싱 버튼은 업로드 확정 뒤에 동작
+    if st.button("인덱싱 실행", use_container_width=True, key="do_index"):
+        if not st.session_state.get("uploads"):
+            st.warning("먼저 이미지를 업로드하고 '업로드 확정'을 눌러주세요.")
         else:
             docs = []
             with st.spinner("🔎 Vision OCR 및 임베딩 중..."):
                 for up in st.session_state["uploads"]:
-                    # 세션 바이트 → 임시 파일
+                    import tempfile, os
                     suffix = os.path.splitext(up["name"])[1] or ".jpg"
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(up["data"])
                         tmp_path = tmp.name
-
-                    # 사진/라벨은 text_detection으로 바꾸고 싶으면 False로
                     text = vision_ocr_extract(tmp_path, use_document=True)
                     if not text:
                         text = f"filename: {os.path.basename(tmp_path)}"
                     docs.append({"source": tmp_path, "text": text})
-
                 add_documents(docs)
 
             st.success(f"✅ {len(docs)}개 이미지 인덱싱 완료")
