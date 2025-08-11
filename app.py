@@ -9,22 +9,24 @@ import requests
 
 import streamlit as st
 from PIL import Image
-from dotenv import load_dotenv
 
 from langchain.embeddings.base import Embeddings
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 
 # -----------------------------
-# 환경 변수
+# 환경변수: Streamlit Secrets에서 읽기
 # -----------------------------
-load_dotenv()
-CLOVA_HOST = os.getenv("CLOVA_HOST", "clovastudio.stream.ntruss.com")
-CLOVA_API_KEY = os.getenv("CLOVA_API_KEY")  # 형태: "Bearer <YOUR_API_KEY>"
-OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY")  # 없으면 demo키 "helloworld" 사용
+CLOVA_API_KEY = st.secrets.get("CLOVA_API_KEY", "")
+CLOVA_HOST = st.secrets.get("CLOVA_HOST", "clovastudio.stream.ntruss.com")
+OCR_SPACE_API_KEY = st.secrets.get("OCR_SPACE_API_KEY", "")
+
+if not CLOVA_API_KEY:
+    st.error("❌ CLOVA_API_KEY가 secrets.toml에 설정되어야 합니다.")
+    st.stop()
 
 # -----------------------------
-# 임베딩(v2) 실행기 (CLOVA)
+# CLOVA v2 임베딩 실행기
 # -----------------------------
 class CompletionExecutor:
     def __init__(self, host: str, api_key: str, request_id: str):
@@ -47,7 +49,6 @@ class CompletionExecutor:
 
     def execute(self, completion_request: dict):
         res = self._send_request(completion_request)
-        # 성공 케이스 예: {"status":{"code":"20000"...},"result":{"embedding":[...]}}
         if isinstance(res, dict) and res.get("status", {}).get("code") == "20000":
             return res.get("result")
         return {"error": res}
@@ -55,8 +56,6 @@ class CompletionExecutor:
 class ClovaV2Embeddings(Embeddings):
     """LangChain Embeddings 어댑터 (v2, 단건 호출)"""
     def __init__(self, host: str, api_key: str):
-        if not api_key:
-            raise RuntimeError("CLOVA_API_KEY 환경변수가 필요합니다. (예: 'Bearer <YOUR_API_KEY>')")
         self.host = host
         self.api_key = api_key
 
@@ -70,10 +69,8 @@ class ClovaV2Embeddings(Embeddings):
         res = executor.execute(payload)
         if "error" in res:
             raise RuntimeError(f"CLOVA v2 embedding error: {res['error']}")
-        # 보통 {"embedding":[...]}
         if "embedding" in res:
             return res["embedding"]
-        # 혹시 {"result":{"embedding":[...]}}로 감싸져 오면 위 executor에서 풀어서 내려오므로 일반적으론 도달 X
         raise RuntimeError(f"Unexpected embedding response: {res}")
 
     def embed_query(self, text: str):
@@ -86,11 +83,7 @@ class ClovaV2Embeddings(Embeddings):
 # OCR.space 기반 OCR
 # -----------------------------
 def extract_text_from_image(tmp_path: str) -> str:
-    """
-    Streamlit Cloud 친화적인 경량 OCR.
-    무료 데모키(helloworld)는 용량/속도 제한이 있으니 가능하면 OCR_SPACE_API_KEY 설정 권장.
-    """
-    key = OCR_SPACE_API_KEY or "helloworld"
+    key = OCR_SPACE_API_KEY or "helloworld"  # demo 키
     try:
         with open(tmp_path, "rb") as f:
             r = requests.post(
@@ -128,7 +121,7 @@ st.caption("OCR.space + CLOVA Studio Embedding v2 + LangChain + FAISS")
 try:
     embeddings = ClovaV2Embeddings(host=CLOVA_HOST, api_key=CLOVA_API_KEY)
 except Exception as e:
-    st.error("❌ CLOVA 임베딩 초기화 실패. 환경변수(특히 CLOVA_API_KEY)를 확인하세요.")
+    st.error("❌ CLOVA 임베딩 초기화 실패. secrets.toml 내용을 확인하세요.")
     st.exception(e)
     st.stop()
 
@@ -141,8 +134,7 @@ with tab1:
     uploaded_files = st.file_uploader(
         "이미지를 업로드하세요 (여러 장 가능)", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True
     )
-    run = st.button("인덱싱 실행", use_container_width=True)
-    if run:
+    if st.button("인덱싱 실행", use_container_width=True):
         if not uploaded_files:
             st.warning("먼저 이미지를 업로드하세요.")
         else:
